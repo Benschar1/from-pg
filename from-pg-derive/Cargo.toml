@@ -1,0 +1,17 @@
+[package]
+name = "from-pg-derive"
+version = "0.1.0"
+edition = "2024"
+description = "Internal proc macro crate for from-pg"
+documentation = "https://docs.rs/from-pg-derive"
+homepage = "https://github.com/Benschar1/from-pg"
+repository = "https://github.com/Benschar1/from-pg"
+license = "MIT OR Apache-2.0"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1.0.95"
+quote = "1.0.40"
+syn = "2.0.104"

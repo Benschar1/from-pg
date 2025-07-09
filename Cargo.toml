@@ -1,0 +1,18 @@
+[package]
+name = "from-pg"
+version = "0.1.0"
+edition = "2024"
+description = "Trait for converting a postgres row into a struct"
+documentation = "https://docs.rs/from-pg"
+readme = "README.md"
+homepage = "https://github.com/Benschar1/from-pg"
+repository = "https://github.com/Benschar1/from-pg"
+license = "MIT OR Apache-2.0"
+
+
+[workspace]
+members = ["from-pg-derive"]
+
+[dependencies]
+from-pg-derive = { version = "0.1.0", path = "from-pg-derive" }
+tokio-postgres = "0.7.13"
