@@ -1,0 +1,7 @@
+- The methods for a derived field on a config object should be more integrated with the derived type. For instance, the prefix method should add the prefix to all the derived config fields.
+- the set method for a derived config field should take a function mapping a derived config to a derived config. so instead of calling `UserConfig::new().set_address(AddressConfig::new().set_zip("12345))`, you can call `UserConfig::new().set_address(|c| c.set_zip("12345"))`.
+- there should be a prefix_all method on the config fields.
+- there should be a default method for each field that sets it to the plain name.
+- The config objects should have a method for doing the conversion itself. So instead of writing `Type::from(&row, TypeConfig::new().set_field1(...))`, you can write `TypeConfig::new().set_field1(...).from_pg(&row)`.
+- the error object should keep the structure of derived fields instead of just having an error. So the type of `UserError::address` should be `AddressError` instead of `Error`.
+- the prefix methods should take an &str, not a string.
