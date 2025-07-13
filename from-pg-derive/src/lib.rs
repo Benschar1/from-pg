@@ -51,7 +51,6 @@ fn from_pg_helper(
 
     let fields = map_fields(item_fields, |s| s.to_string())?;
 
-    // Collect field info including derived types
     let field_infos: Vec<_> = item_fields
         .iter()
         .map(|field| {
@@ -67,10 +66,14 @@ fn from_pg_helper(
                     ty,
                     func,
                 },
-                Some(FieldDeserializer::Derive { ty }) => FieldInfo::Derive {
-                    name: field_name.clone(),
-                    ty,
-                },
+                Some(FieldDeserializer::Derive) => {
+                    let (derived_ty, is_option) = extract_option_inner_type(&field.ty);
+                    FieldInfo::Derive {
+                        name: field_name.clone(),
+                        ty: derived_ty,
+                        is_option,
+                    }
+                }
                 _ => FieldInfo::Default {
                     name: field_name.clone(),
                 },
@@ -81,91 +84,142 @@ fn from_pg_helper(
     let field_deserializations = field_infos
         .iter()
         .map(|field_info| {
-            Ok(match field_info {
+            match field_info {
                 FieldInfo::Custom { name, ty, func } => quote! {
                     row
                         .try_get::<_,#ty>(conf.#name.as_str())
                         .map_err(|e| Box::new(e) as Box<(dyn std::error::Error + Send + Sync)>)
                         .and_then(|val| #func(val).map_err(|e| e.into()))
                 },
-                FieldInfo::Derive { name, ty } => quote! {
-                    <#ty as FromPg>::from_pg(row, &conf.#name)
-                        .map_err(|e| Box::new(e) as Box<(dyn std::error::Error + Send + Sync)>)
+                FieldInfo::Derive { name, ty, is_option } => {
+                    if *is_option {
+                        quote! {
+                            {
+                                // Helper type to detect null values without casting to a specific type
+                                // It always succeeds for non-null values, and always fails for null/missing
+                                struct AnySql;
+                                impl tokio_postgres::types::FromSql<'_> for AnySql {
+                                    fn from_sql(
+                                        _type_: &tokio_postgres::types::Type,
+                                        _raw: &[u8]
+                                    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+                                        Ok(AnySql)
+                                    }
+                                    
+                                    fn accepts(_type_: &tokio_postgres::types::Type) -> bool {
+                                        true
+                                    }
+                                }
+                                
+                                let has_non_null_fields = conf.#name.fields().iter().any(|&field_name| {
+                                    row.try_get::<_, AnySql>(field_name).is_ok()
+                                });
+                                
+                                if has_non_null_fields {
+                                    match <#ty as FromPg>::from_pg(row, &conf.#name) {
+                                        Ok(val) => Ok(Some(val)),
+                                        Err(e) => Err(Box::new(e) as Box<(dyn std::error::Error + Send + Sync)>)
+                                    }
+                                } else {
+                                    Ok(None)
+                                }
+                            }
+                        }
+                    } else {
+                        quote! {
+                            <#ty as FromPg>::from_pg(row, &conf.#name)
+                                .map_err(|e| Box::new(e) as Box<(dyn std::error::Error + Send + Sync)>)
+                        }
+                    }
                 },
-                FieldInfo::Default { name } => quote! {
+                FieldInfo::Default { name, .. } => quote! {
                     row
                         .try_get(conf.#name.as_str())
                         .map_err(|e| Box::new(e) as Box<(dyn std::error::Error + Send + Sync)>)
                 },
-            })
+            }
         })
-        .collect::<syn::Result<Vec<_>>>()?;
+        .collect::<Vec<_>>();
 
-    // Generate config struct fields
     let config_fields = field_infos
         .iter()
         .map(|field_info| {
-            Ok(match field_info {
+            match field_info {
                 FieldInfo::Custom { name, .. } => quote! {
                     #name: String
                 },
-                FieldInfo::Derive { name, ty } => quote! {
+                FieldInfo::Derive { name, ty, .. } => quote! {
                     #name: <#ty as FromPg>::Config
                 },
-                FieldInfo::Default { name } => quote! {
+                FieldInfo::Default { name, .. } => quote! {
                     #name: String
                 },
-            })
+            }
         })
-        .collect::<syn::Result<Vec<_>>>()?;
+        .collect::<Vec<_>>();
 
-    // Generate default implementation
     let default_fields = field_infos
         .iter()
         .map(|field_info| {
-            Ok(match field_info {
+            match field_info {
                 FieldInfo::Custom { name, .. } => quote! {
                     #name: String::from(stringify!(#name))
                 },
-                FieldInfo::Derive { name, ty } => quote! {
+                FieldInfo::Derive { name, ty, .. } => quote! {
                     #name: <#ty as FromPg>::Config::default()
                 },
-                FieldInfo::Default { name } => quote! {
+                FieldInfo::Default { name, .. } => quote! {
                     #name: String::from(stringify!(#name))
                 },
-            })
+            }
         })
-        .collect::<syn::Result<Vec<_>>>()?;
+        .collect::<Vec<_>>();
 
-    // Generate getter methods
     let getter_methods = field_infos
         .iter()
         .map(|field_info| {
-            Ok(match field_info {
+            match field_info {
                 FieldInfo::Custom { name, .. } => quote! {
                     pub fn #name(&self) -> &str {
                         self.#name.as_ref()
                     }
                 },
-                FieldInfo::Derive { name, ty } => quote! {
+                FieldInfo::Derive { name, ty, .. } => quote! {
                     pub fn #name(&self) -> &<#ty as FromPg>::Config {
                         &self.#name
                     }
                 },
-                FieldInfo::Default { name } => quote! {
+                FieldInfo::Default { name, .. } => quote! {
                     pub fn #name(&self) -> &str {
                         self.#name.as_ref()
                     }
                 },
-            })
+            }
         })
-        .collect::<syn::Result<Vec<_>>>()?;
+        .collect::<Vec<_>>();
 
-    // Generate setter methods
+    // only include non-derived fields
+    let fields_method = {
+        let field_getters: Vec<_> = field_infos
+            .iter()
+            .filter_map(|field_info| match field_info {
+                FieldInfo::Custom { name, .. } => Some(quote! { self.#name() }),
+                FieldInfo::Default { name, .. } => Some(quote! { self.#name() }),
+                FieldInfo::Derive { .. } => None, // Exclude derived fields
+            })
+            .collect();
+
+        quote! {
+            pub fn fields(&self) -> Vec<&str> {
+                vec![#( #field_getters ),*]
+            }
+        }
+    };
+
     let setter_methods = field_infos
         .iter()
         .map(|field_info| {
-            Ok(match field_info {
+            match field_info {
                 FieldInfo::Custom { name, .. } => {
                     let set_method = format_ident!("set_{}", name);
                     quote! {
@@ -177,7 +231,7 @@ fn from_pg_helper(
                         }
                     }
                 }
-                FieldInfo::Derive { name, ty } => {
+                FieldInfo::Derive { name, ty, .. } => {
                     let set_method = format_ident!("set_{}", name);
                     quote! {
                         pub fn #set_method(self, config: <#ty as FromPg>::Config) -> Self {
@@ -188,7 +242,7 @@ fn from_pg_helper(
                         }
                     }
                 }
-                FieldInfo::Default { name } => {
+                FieldInfo::Default { name, .. } => {
                     let set_method = format_ident!("set_{}", name);
                     quote! {
                         pub fn #set_method(self, name: String) -> Self {
@@ -199,18 +253,17 @@ fn from_pg_helper(
                         }
                     }
                 }
-            })
+            }
         })
-        .collect::<syn::Result<Vec<_>>>()?;
+        .collect::<Vec<_>>();
 
-    // Generate prefix methods
     let prefix_methods = field_infos
         .iter()
-        .map(|field_info| {
-            Ok(match field_info {
+        .filter_map(|field_info| {
+            match field_info {
                 FieldInfo::Custom { name, .. } => {
                     let prefix_method = format_ident!("prefix_{}", name);
-                    quote! {
+                    Some(quote! {
                         pub fn #prefix_method(self, prefix: String) -> Self {
                             let mut name = prefix.clone();
                             name.push_str(stringify!(#name));
@@ -219,25 +272,14 @@ fn from_pg_helper(
                                 ..self
                             }
                         }
-                    }
+                    })
                 }
-                FieldInfo::Derive { name, .. } => {
-                    let prefix_method = format_ident!("prefix_{}", name);
-                    quote! {
-                        pub fn #prefix_method(self, prefix: String) -> Self {
-                            let mut config = self.#name;
-                            // Note: This is a simplified prefix implementation for derived configs
-                            // You might want to customize this based on your needs
-                            Self {
-                                #name: config,
-                                ..self
-                            }
-                        }
-                    }
+                FieldInfo::Derive { .. } => {
+                    None
                 }
-                FieldInfo::Default { name } => {
+                FieldInfo::Default { name, .. } => {
                     let prefix_method = format_ident!("prefix_{}", name);
-                    quote! {
+                    Some(quote! {
                         pub fn #prefix_method(self, prefix: String) -> Self {
                             let mut name = prefix.clone();
                             name.push_str(stringify!(#name));
@@ -246,11 +288,10 @@ fn from_pg_helper(
                                 ..self
                             }
                         }
-                    }
+                    })
                 }
-            })
-        })
-        .collect::<syn::Result<Vec<_>>>()?;
+            }
+        }).collect::<Vec<_>>();
 
     Ok(quote! {
         #[derive(Clone, Debug, Eq, PartialEq)]
@@ -276,6 +317,8 @@ fn from_pg_helper(
             #( #setter_methods )*
 
             #( #prefix_methods )*
+
+            #fields_method
         }
 
         #[derive(Debug, Default)]
@@ -309,9 +352,7 @@ fn from_pg_helper(
                         #( #fields ),*
                     }),
                     ( #( #fields ),* ) => Err(Self::Error {
-                        #(
-                            #fields: #fields.err()
-                        ),*
+                        #( #fields: #fields.err() ),*
                     })
                 }
             }
@@ -328,15 +369,32 @@ enum FieldInfo {
     Derive {
         name: Ident,
         ty: Type,
+        is_option: bool,
     },
     Default {
         name: Ident,
     },
 }
 
+/// Extracts the inner type of an Option<T> and returns (Type, bool) where bool indicates if it was an Option
+fn extract_option_inner_type(ty: &Type) -> (Type, bool) {
+    if let Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.last() {
+            if segment.ident == "Option" {
+                if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                    if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
+                        return (inner_ty.clone(), true);
+                    }
+                }
+            }
+        }
+    }
+    (ty.clone(), false)
+}
+
 enum FieldDeserializer {
     Custom { ty: Type, func: ExprPath },
-    Derive { ty: Type },
+    Derive,
 }
 
 impl FieldDeserializer {
@@ -377,8 +435,8 @@ impl syn::parse::Parse for FieldDeserializer {
             }
             "derive" => {
                 input.parse::<Token![=]>()?;
-                let ty: Type = input.parse()?;
-                Ok(Self::Derive { ty })
+                let _ty: Type = input.parse()?;
+                Ok(Self::Derive)
             }
             _ => Err(syn::Error::new(
                 first_token.span(),

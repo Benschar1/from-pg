@@ -58,12 +58,21 @@ pub struct UserWithContact {
 #[derive(FromPg)]
 pub struct EmptyStruct {}
 
+#[derive(FromPg)]
+pub struct UserWithOptionalAddress {
+    pub id: i64,
+    pub name: String,
+    #[frompg(derive = Address)]
+    pub address: Option<Address>,
+}
+
 #[allow(dead_code)]
 fn test_func(row: &Row) {
     let _ = User::from_pg_default(row);
     let _ = EmptyStruct::from_pg_default(row);
     let _ = UserWithAddress::from_pg_default(row);
     let _ = UserWithContact::from_pg_default(row);
+    let _ = UserWithOptionalAddress::from_pg_default(row);
 
     let _ = User::from_pg(
         row,
@@ -84,5 +93,12 @@ fn test_func(row: &Row) {
         &UserWithContactConfig::new()
             .prefix_name("user".into())
             .set_contact(ContactInfoConfig::new()),
+    );
+
+    let _ = UserWithOptionalAddress::from_pg(
+        row,
+        &UserWithOptionalAddressConfig::new()
+            .prefix_name("user".into())
+            .set_address(AddressConfig::new()),
     );
 }
